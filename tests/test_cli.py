@@ -56,13 +56,13 @@ def test_resolve_calibration_port_prefers_cli_or_config(monkeypatch):
     config = SimpleNamespace(device=SimpleNamespace(motor_port="/dev/tty.usbmodemA"))
     called = {"detect": False}
 
-    def _detect_ports():
+    def _detect_motor_port():
         called["detect"] = True
         return {"motor_port": "/dev/tty.usbmodemB", "messages": []}
 
     import lampgo.autodetect as autodetect
 
-    monkeypatch.setattr(autodetect, "detect_ports", _detect_ports)
+    monkeypatch.setattr(autodetect, "detect_motor_port", _detect_motor_port)
     port = cli._resolve_calibration_port(args, config)
     assert port == "/dev/tty.usbmodemA"
     assert called["detect"] is False
@@ -72,14 +72,34 @@ def test_resolve_calibration_port_falls_back_to_autodetect(monkeypatch):
     args = argparse.Namespace(port=None)
     config = SimpleNamespace(device=SimpleNamespace(motor_port=""))
 
-    def _detect_ports():
+    def _detect_motor_port():
         return {"motor_port": "/dev/tty.usbmodemB", "messages": ["Found 1 serial port(s)"]}
 
     import lampgo.autodetect as autodetect
 
-    monkeypatch.setattr(autodetect, "detect_ports", _detect_ports)
+    monkeypatch.setattr(autodetect, "detect_motor_port", _detect_motor_port)
     port = cli._resolve_calibration_port(args, config)
     assert port == "/dev/tty.usbmodemB"
+
+
+def test_resolve_motor_port_auto_detect_ignores_saved_port(monkeypatch):
+    args = argparse.Namespace(port=None, auto_detect=True)
+    config = SimpleNamespace(device=SimpleNamespace(motor_port="COM7"))
+
+    import lampgo.autodetect as autodetect
+
+    monkeypatch.setattr(
+        autodetect,
+        "detect_motor_port",
+        lambda: {
+            "motor_port": "COM5",
+            "motor_detection": "feetech_probe",
+            "motor_candidates": ["COM5"],
+            "messages": ["Motor bus detected: COM5"],
+        },
+    )
+
+    assert cli._resolve_motor_port(args, config) == "COM5"
 
 
 def test_calibration_aborts_outside_project_root(monkeypatch, tmp_path, capsys):

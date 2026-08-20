@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -709,11 +710,14 @@ class AgentSDKManager:
         interpreter (with all our voice extras) is used.
         """
         bin_dir = Path(sys.executable).parent
-        for binary in AGENT_SDK_BINARIES:
+        binary_names = list(AGENT_SDK_BINARIES)
+        if os.name == "nt":
+            binary_names.extend(f"{binary}.exe" for binary in AGENT_SDK_BINARIES)
+        for binary in binary_names:
             venv_bin = bin_dir / binary
             if venv_bin.exists():
                 return str(venv_bin)
-        for binary in AGENT_SDK_BINARIES:
+        for binary in binary_names:
             which = shutil.which(binary)
             if which:
                 return which
@@ -789,7 +793,13 @@ class AgentSDKManager:
         try:
             if hasattr(os, "getuid"):
                 return int(process.uids().real) == os.getuid()
-            return process.username().casefold() == getpass.getuser().casefold()
+            username = str(process.username() or "").casefold()
+            current_user = str(getpass.getuser() or os.environ.get("USERNAME") or "").casefold()
+            return username in {
+                current_user,
+                current_user.rsplit("\\", 1)[-1],
+                current_user.rsplit("/", 1)[-1],
+            } or username.rsplit("\\", 1)[-1] == current_user
         except Exception:
             return False
 
@@ -1030,19 +1040,28 @@ class AgentSDKManager:
         self._ready_event.clear()
         self._startup_failed_event.clear()
         try:
+            spawn_kwargs = {
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.STDOUT,
+                "env": env,
+            }
+            if os.name == "nt":
+                spawn_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                spawn_kwargs["start_new_session"] = True
             self._process = await asyncio.create_subprocess_exec(
                 sdk_binary,
-                "--config-file", str(self._roles_path),
-                "--host", "127.0.0.1",
-                "--port", str(self._port),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
+                "--config-file",
+                str(self._roles_path),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(self._port),
+                **spawn_kwargs,
             )
             try:
                 self._process_pgid = os.getpgid(self._process.pid)
-            except OSError:
+            except (AttributeError, OSError):
                 self._process_pgid = None
             self._monitor_task = asyncio.create_task(self._monitor())
             logger.info(
@@ -1071,7 +1090,9 @@ class AgentSDKManager:
         logger.info("agent_sdk.stopping", pid=pid, pgid=pgid)
 
         try:
-            if pgid is not None:
+            if os.name == "nt":
+                proc.terminate()
+            elif pgid is not None:
                 os.killpg(pgid, signal.SIGTERM)
             else:
                 proc.send_signal(signal.SIGTERM)
@@ -1079,7 +1100,7 @@ class AgentSDKManager:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
                 logger.warning("agent_sdk.stop_timeout_killing", pid=pid, pgid=pgid)
-                if pgid is not None:
+                if os.name != "nt" and pgid is not None:
                     os.killpg(pgid, signal.SIGKILL)
                 else:
                     proc.kill()

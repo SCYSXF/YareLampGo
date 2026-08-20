@@ -39,6 +39,13 @@ DEFAULT_JOINT_LIMITS: dict[str, JointLimits] = {
 }
 
 
+def _default_socket_path() -> str:
+    """Return the platform-native local IPC endpoint setting."""
+    if os.name == "nt":
+        return "tcp://127.0.0.1:28420"
+    return "/tmp/lampgo.sock"
+
+
 class MotorConfig(BaseModel):
     """Per-motor hardware configuration."""
 
@@ -595,7 +602,7 @@ class LampgoConfig(BaseModel):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
-    socket_path: str = Field(default="/tmp/lampgo.sock", description="Unix socket path for IPC")
+    socket_path: str = Field(default_factory=_default_socket_path, description="Local IPC endpoint")
     web_enabled: bool = Field(default=False, description="Enable web UI on startup")
     home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
     no_hw: bool = Field(default=False, description="Skip hardware connections (motors/LED)")
