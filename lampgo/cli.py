@@ -421,14 +421,8 @@ def _find_related_pids_posix() -> list[int]:
 
 def _find_related_pids_windows() -> list[int]:
     """Find LampGo processes through psutil on Windows."""
-    try:
-        import psutil
-    except ImportError:
-        print(
-            "[warn] Windows process cleanup requires psutil. "
-            "Re-run .\\install.ps1 or install the project dependencies.",
-            file=sys.stderr,
-        )
+    psutil = _load_windows_psutil()
+    if psutil is None:
         return []
 
     current_pid = os.getpid()
@@ -461,40 +455,8 @@ def _find_related_pids_windows() -> list[int]:
     return sorted(set(pids))
 
 
-def _terminate_pids(pids: list[int]) -> tuple[list[int], list[int]]:
-    """Try graceful terminate first, then force kill remaining."""
-    if os.name == "nt":
-        return _terminate_pids_windows(pids)
-
-    terminated: list[int] = []
-    failed: list[int] = []
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            terminated.append(pid)
-        except ProcessLookupError:
-            pass
-        except Exception:
-            failed.append(pid)
-    time.sleep(0.2)
-    for pid in list(terminated):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            continue
-        except Exception:
-            continue
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            continue
-        except Exception:
-            failed.append(pid)
-    return terminated, sorted(set(failed))
-
-
-def _terminate_pids_windows(pids: list[int]) -> tuple[list[int], list[int]]:
-    """Terminate a verified set of Windows processes and then force-kill stragglers."""
+def _load_windows_psutil():
+    """Return psutil for Windows cleanup, or warn once per attempted operation."""
     try:
         import psutil
     except ImportError:
@@ -503,28 +465,102 @@ def _terminate_pids_windows(pids: list[int]) -> tuple[list[int], list[int]]:
             "Re-run .\\install.ps1 or install the project dependencies.",
             file=sys.stderr,
         )
+        return None
+    return psutil
+
+
+def _terminate_pids(pids: list[int]) -> tuple[list[int], list[int]]:
+    """Stop related processes and return confirmed-stopped and failed PIDs."""
+    if os.name == "nt":
+        return _terminate_pids_windows(pids)
+
+    targets = sorted(set(pids))
+    failed: set[int] = set()
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            failed.add(pid)
+
+    remaining = _wait_for_posix_pids(
+        [pid for pid in targets if pid not in failed],
+        timeout_s=1.0,
+    )
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            failed.add(pid)
+
+    failed.update(
+        _wait_for_posix_pids(
+            [pid for pid in remaining if pid not in failed],
+            timeout_s=1.0,
+        )
+    )
+    stopped = [pid for pid in targets if pid not in failed]
+    return stopped, sorted(failed)
+
+
+def _wait_for_posix_pids(pids: list[int], timeout_s: float) -> list[int]:
+    """Wait for POSIX PIDs to disappear and return any still present."""
+    remaining = set(pids)
+    deadline = time.monotonic() + timeout_s
+    while remaining:
+        alive: set[int] = set()
+        for pid in remaining:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                alive.add(pid)
+            else:
+                alive.add(pid)
+        remaining = alive
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return sorted(remaining)
+
+
+def _terminate_pids_windows(pids: list[int]) -> tuple[list[int], list[int]]:
+    """Stop Windows processes, waiting after graceful and forced termination."""
+    psutil = _load_windows_psutil()
+    if psutil is None:
         return [], sorted(set(pids))
 
-    terminated: list[int] = []
-    failed: list[int] = []
+    targets = sorted(set(pids))
+    failed: set[int] = set()
     processes = []
-    for pid in pids:
+    for pid in targets:
         try:
             process = psutil.Process(pid)
             process.terminate()
             processes.append(process)
-            terminated.append(pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            failed.append(pid)
+        except psutil.NoSuchProcess:
+            pass
+        except (psutil.AccessDenied, OSError):
+            failed.add(pid)
 
     if processes:
-        _, alive = psutil.wait_procs(processes, timeout=0.5)
+        _, alive = psutil.wait_procs(processes, timeout=1.0)
         for process in alive:
             try:
                 process.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                failed.append(process.pid)
-    return sorted(set(terminated)), sorted(set(failed))
+            except psutil.NoSuchProcess:
+                pass
+            except (psutil.AccessDenied, OSError):
+                failed.add(process.pid)
+        _, still_alive = psutil.wait_procs(alive, timeout=1.0)
+        failed.update(process.pid for process in still_alive)
+
+    stopped = [pid for pid in targets if pid not in failed]
+    return stopped, sorted(failed)
 
 
 def _release_motor_torque(config) -> str:
@@ -970,21 +1006,29 @@ def _cmd_clear(args: argparse.Namespace) -> None:
 
     config = load_config(config_path=getattr(args, "config", None))
     lines: list[str] = []
+    process_cleanup_confirmed = False
 
     if getattr(args, "skip_kill", False):
         lines.append("Skip process cleanup (--skip-kill).")
+    elif os.name == "nt" and _load_windows_psutil() is None:
+        lines.append("Skipped process cleanup: psutil is unavailable on Windows.")
     else:
         pids = _find_related_pids()
         if not pids:
             lines.append("No related processes found.")
+            process_cleanup_confirmed = True
         else:
-            terminated, failed = _terminate_pids(pids)
-            lines.append(f"Sent terminate to PIDs: {terminated}")
+            stopped, failed = _terminate_pids(pids)
+            lines.append(f"Stopped related PIDs: {stopped}")
             if failed:
                 lines.append(f"Failed to terminate PIDs: {failed}")
+            else:
+                process_cleanup_confirmed = True
 
     if getattr(args, "skip_release", False):
         lines.append("Skip torque release (--skip-release).")
+    elif not process_cleanup_confirmed:
+        lines.append("Skipped torque release: related processes may still own the motor port.")
     else:
         lines.append(_release_motor_torque(config))
 

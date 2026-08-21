@@ -70,6 +70,130 @@ def test_find_related_pids_windows_warns_when_psutil_is_missing(monkeypatch, cap
     assert "requires psutil" in capsys.readouterr().err
 
 
+def test_terminate_pids_windows_waits_after_force_kill(monkeypatch):
+    events: list[str] = []
+
+    class NoSuchProcess(Exception):
+        pass
+
+    class AccessDenied(Exception):
+        pass
+
+    class Process:
+        pid = 200
+
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+
+    process = Process()
+    waits = iter([
+        ([], [process]),
+        ([process], []),
+    ])
+    fake_psutil = SimpleNamespace(
+        NoSuchProcess=NoSuchProcess,
+        AccessDenied=AccessDenied,
+        Process=lambda _pid: process,
+        wait_procs=lambda processes, timeout: next(waits),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert cli._terminate_pids_windows([process.pid]) == ([process.pid], [])
+    assert events == ["terminate", "kill"]
+
+
+def test_cmd_clear_skips_torque_release_when_processes_remain(monkeypatch, capsys):
+    args = argparse.Namespace(config=None, skip_kill=False, skip_release=False)
+
+    import lampgo.core.config as config_mod
+    import lampgo.ipc as ipc
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            socket_path="tcp://127.0.0.1:28420",
+            device=SimpleNamespace(motor_port="COM5", lamp_id="AL02"),
+        ),
+    )
+    monkeypatch.setattr(cli, "_find_related_pids", lambda: [200])
+    monkeypatch.setattr(cli, "_terminate_pids", lambda _pids: ([], [200]))
+    monkeypatch.setattr(
+        cli,
+        "_release_motor_torque",
+        lambda _config: (_ for _ in ()).throw(AssertionError("motor port must stay closed")),
+    )
+    monkeypatch.setattr(ipc, "cleanup_ipc_endpoint", lambda _path: False)
+
+    cli._cmd_clear(args)
+
+    output = capsys.readouterr().out
+    assert "Failed to terminate PIDs: [200]" in output
+    assert "Skipped torque release" in output
+
+
+def test_cmd_clear_skip_kill_does_not_release_torque(monkeypatch, capsys):
+    args = argparse.Namespace(config=None, skip_kill=True, skip_release=False)
+
+    import lampgo.core.config as config_mod
+    import lampgo.ipc as ipc
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            socket_path="tcp://127.0.0.1:28420",
+            device=SimpleNamespace(motor_port="COM5", lamp_id="AL02"),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_release_motor_torque",
+        lambda _config: (_ for _ in ()).throw(AssertionError("motor port must stay closed")),
+    )
+    monkeypatch.setattr(ipc, "cleanup_ipc_endpoint", lambda _path: False)
+
+    cli._cmd_clear(args)
+
+    output = capsys.readouterr().out
+    assert "Skip process cleanup" in output
+    assert "Skipped torque release" in output
+
+
+def test_cmd_clear_missing_psutil_does_not_release_torque(monkeypatch, capsys):
+    args = argparse.Namespace(config=None, skip_kill=False, skip_release=False)
+
+    import lampgo.core.config as config_mod
+    import lampgo.ipc as ipc
+
+    monkeypatch.setattr(cli.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            socket_path="tcp://127.0.0.1:28420",
+            device=SimpleNamespace(motor_port="COM5", lamp_id="AL02"),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_release_motor_torque",
+        lambda _config: (_ for _ in ()).throw(AssertionError("motor port must stay closed")),
+    )
+    monkeypatch.setattr(ipc, "cleanup_ipc_endpoint", lambda _path: False)
+
+    cli._cmd_clear(args)
+
+    captured = capsys.readouterr()
+    assert "requires psutil" in captured.err
+    assert "Skipped process cleanup" in captured.out
+    assert "Skipped torque release" in captured.out
+
+
 def test_resolve_calibration_port_prefers_cli_or_config(monkeypatch):
     args = argparse.Namespace(port=None)
     config = SimpleNamespace(device=SimpleNamespace(motor_port="/dev/tty.usbmodemA"))

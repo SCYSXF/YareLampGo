@@ -295,7 +295,11 @@ def ipc_send(
     timeout: float = 30.0,
     token_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Synchronous IPC client. Raises ConnectionRefusedError if absent."""
+    """Send one IPC request.
+
+    Raises connection/socket errors when the endpoint is unavailable, plus
+    ``FileNotFoundError`` or ``ValueError`` when a TCP token is missing or invalid.
+    """
     raw_path = socket_path or _get_socket_path()
     endpoint = _endpoint_for_path(raw_path)
     payload = dict(request)

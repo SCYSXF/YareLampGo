@@ -880,33 +880,39 @@ class AgentSDKManager:
         psutil = self._psutil()
         try:
             root = psutil.Process(owner.root_pid)
-            process_tree = root.children(recursive=True) + [root]
-        except psutil.NoSuchProcess:
+            process_tree = [*root.children(recursive=True), root]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             return
         for process in process_tree:
             try:
                 process.kill() if force else process.terminate()
-            except psutil.NoSuchProcess:
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-    def _stop_windows_process_tree(self, root_pid: int, timeout_s: float = 5.0) -> bool:
-        """Terminate and, if needed, kill an SDK process tree on Windows."""
+    def _stop_windows_process_tree(
+        self,
+        root_pid: int,
+        timeout_s: float = 5.0,
+    ) -> tuple[bool, list[int]]:
+        """Stop an SDK tree and return ``(forced_kill, remaining_pids)``."""
         psutil = self._psutil()
         try:
             root = psutil.Process(root_pid)
-            process_tree = root.children(recursive=True) + [root]
+            process_tree = [*root.children(recursive=True), root]
         except psutil.NoSuchProcess:
-            return False
+            return False, []
+        except psutil.AccessDenied:
+            return False, [root_pid]
 
         for process in process_tree:
             try:
                 process.terminate()
-            except psutil.NoSuchProcess:
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
         _, alive = psutil.wait_procs(process_tree, timeout=timeout_s)
         if not alive:
-            return False
+            return False, []
 
         logger.warning(
             "agent_sdk.stop_timeout_killing",
@@ -916,16 +922,11 @@ class AgentSDKManager:
         for process in alive:
             try:
                 process.kill()
-            except psutil.NoSuchProcess:
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
         _, still_alive = psutil.wait_procs(alive, timeout=timeout_s)
-        if still_alive:
-            raise RuntimeError(
-                "failed to stop Agent SDK process tree: "
-                + ", ".join(str(process.pid) for process in still_alive)
-            )
-        return True
+        return True, sorted(process.pid for process in still_alive)
 
     async def _wait_for_port_free(self, timeout_s: float) -> bool:
         loop = asyncio.get_running_loop()
@@ -1125,12 +1126,36 @@ class AgentSDKManager:
         proc = self._process
         pid = proc.pid
         pgid = self._process_pgid
+        forced_kill = False
+        remaining_pids: list[int] = []
         logger.info("agent_sdk.stopping", pid=pid, pgid=pgid)
 
         try:
             if os.name == "nt":
-                await asyncio.to_thread(self._stop_windows_process_tree, pid)
-                await proc.wait()
+                try:
+                    forced_kill, remaining_pids = await asyncio.to_thread(
+                        self._stop_windows_process_tree,
+                        pid,
+                    )
+                except Exception:
+                    logger.exception("agent_sdk.process_tree_stop_error", pid=pid)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except TimeoutError:
+                    forced_kill = True
+                    proc.kill()
+                    await proc.wait()
+                remaining_pids = [remaining_pid for remaining_pid in remaining_pids if remaining_pid != pid]
+                if remaining_pids:
+                    self._set_last_error(
+                        "Agent SDK child processes are still running: "
+                        + ", ".join(str(remaining_pid) for remaining_pid in remaining_pids)
+                    )
+                    logger.warning(
+                        "agent_sdk.child_processes_still_running",
+                        pid=pid,
+                        pids=remaining_pids,
+                    )
             elif pgid is not None:
                 os.killpg(pgid, signal.SIGTERM)
                 try:
@@ -1168,7 +1193,13 @@ class AgentSDKManager:
 
         self._cleanup_roles()
         self._cleanup_patch_dir()
-        logger.info("agent_sdk.stopped", pid=pid, pgid=pgid)
+        logger.info(
+            "agent_sdk.stopped",
+            pid=pid,
+            pgid=pgid,
+            forced_kill=forced_kill,
+            remaining_pids=remaining_pids,
+        )
 
     @property
     def is_running(self) -> bool:

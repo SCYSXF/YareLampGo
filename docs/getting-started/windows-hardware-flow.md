@@ -439,13 +439,15 @@ uv run lampgo estop
 uv run lampgo clear
 ```
 
-如果不希望清理其他相关进程，只做安全的无硬件清理：
+如果只想查看清理结果、并且明确不停止进程也不访问电机总线，可以使用：
 
 ```powershell
 uv run lampgo clear --skip-kill --skip-release
 ```
 
-**通过标准：** `lampgo status` 不再连接 daemon，端口可重新启动，舵机不保持扭矩且整机可安全断电。
+这两个跳过参数组合不是安全关机，也不能证明端口或扭矩已释放。正常退出验收必须使用服务窗口 `Ctrl+C`，必要时再运行不带跳过参数的 `uv run lampgo clear`。
+
+**通过标准：** 对正常清理流程，`lampgo status` 不再连接 daemon，端口可重新启动，舵机不保持扭矩且整机可安全断电。
 
 **停止条件：** 如果进程、端口或扭矩状态不明，直接断开 12V；不要在未知状态下插拔舵机线。
 
