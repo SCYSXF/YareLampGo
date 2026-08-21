@@ -259,11 +259,16 @@ class IPCServer:
                 return
             if self._endpoint.kind == "tcp":
                 supplied_token = request.pop(IPC_TOKEN_FIELD, None)
-                if (
-                    not isinstance(supplied_token, str)
-                    or self._token is None
-                    or not hmac.compare_digest(supplied_token, self._token)
-                ):
+                token_matches = False
+                if isinstance(supplied_token, str) and self._token is not None:
+                    try:
+                        token_matches = hmac.compare_digest(
+                            supplied_token.encode("ascii"),
+                            self._token.encode("ascii"),
+                        )
+                    except UnicodeEncodeError:
+                        token_matches = False
+                if not token_matches:
                     logger.warning("ipc.unauthorized_client", peer=writer.get_extra_info("peername"))
                     await self._write_json(writer, {"ok": False, "error": "unauthorized"})
                     return

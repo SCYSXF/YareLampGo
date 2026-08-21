@@ -69,6 +69,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 --dev
 
 验证安装：
 
+Windows 用户的主测试入口是从仓库根目录运行 `uv run pytest -q`；不要直接双击测试文件。该命令会运行项目测试，并在 Windows 环境中覆盖 Windows 兼容性测试。
+
 ```powershell
 uv run python --version
 uv run lampgo --help

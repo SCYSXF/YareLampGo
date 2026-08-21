@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import types
+
+import pytest
 
 
 def test_windows_socket_path_uses_loopback_tcp(monkeypatch):
@@ -99,6 +102,45 @@ def test_tcp_ipc_rejects_unauthorized_request(tmp_path):
             host, port = server._endpoint.address
             reader, writer = await asyncio.open_connection(host, port)
             writer.write(json.dumps({"cmd": "move"}).encode("utf-8") + b"\n")
+            await writer.drain()
+            response = json.loads((await reader.readline()).decode("utf-8"))
+            writer.close()
+            await writer.wait_closed()
+
+            assert response == {"ok": False, "error": "unauthorized"}
+            assert requests == []
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_tcp_ipc_rejects_non_ascii_token(tmp_path):
+    from lampgo.ipc import IPCServer
+
+    async def run() -> None:
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            return {"ok": True}
+
+        server = IPCServer(
+            handler,
+            socket_path="tcp://127.0.0.1:0",
+            token_path=tmp_path / "ipc-token",
+        )
+        await server.start()
+        try:
+            host, port = server._endpoint.address
+            reader, writer = await asyncio.open_connection(host, port)
+            writer.write(
+                json.dumps(
+                    {"cmd": "move", "_lampgo_ipc_token": "口令"},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                + b"\n"
+            )
             await writer.drain()
             response = json.loads((await reader.readline()).decode("utf-8"))
             writer.close()
@@ -238,11 +280,11 @@ def test_windows_system_music_source_uses_recording_device(monkeypatch):
     assert isinstance(source, music.WindowsSystemAudioSource)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only file association behavior")
 def test_desktop_backend_uses_windows_file_association(monkeypatch):
     from lampgo.bridge.desktop import PyAutoGUIBackend
 
     launched: list[str] = []
-    monkeypatch.setattr("os.name", "nt")
     monkeypatch.setattr("os.startfile", lambda app: launched.append(app), raising=False)
 
     backend = object.__new__(PyAutoGUIBackend)
