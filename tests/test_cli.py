@@ -160,6 +160,7 @@ def test_cmd_clear_skip_kill_does_not_release_torque(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "Skip process cleanup" in output
+    assert "torque release is also skipped" in output
     assert "Skipped torque release" in output
 
 

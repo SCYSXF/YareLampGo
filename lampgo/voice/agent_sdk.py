@@ -1145,14 +1145,19 @@ class AgentSDKManager:
                     forced_kill = True
                     proc.kill()
                     await proc.wait()
-                remaining_pids = [remaining_pid for remaining_pid in remaining_pids if remaining_pid != pid]
+                remaining_pids = sorted(set(remaining_pids))
                 if remaining_pids:
-                    self._set_last_error(
-                        "Agent SDK child processes are still running: "
-                        + ", ".join(str(remaining_pid) for remaining_pid in remaining_pids)
-                    )
+                    if remaining_pids == [pid]:
+                        error = f"Agent SDK root process could not be confirmed stopped: {pid}"
+                        event = "agent_sdk.root_process_not_confirmed_stopped"
+                    else:
+                        error = "Agent SDK child processes are still running: " + ", ".join(
+                            str(remaining_pid) for remaining_pid in remaining_pids
+                        )
+                        event = "agent_sdk.child_processes_still_running"
+                    self._set_last_error(error)
                     logger.warning(
-                        "agent_sdk.child_processes_still_running",
+                        event,
                         pid=pid,
                         pids=remaining_pids,
                     )

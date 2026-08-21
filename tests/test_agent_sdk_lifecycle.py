@@ -267,6 +267,57 @@ async def test_stop_reaps_root_when_process_tree_cleanup_errors(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_stop_reports_remaining_child_processes(monkeypatch) -> None:
+    manager = _manager()
+
+    class Process:
+        pid = 2468
+        returncode = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    manager._process = Process()
+    monkeypatch.setattr(agent_sdk.os, "name", "nt")
+    monkeypatch.setattr(
+        manager,
+        "_stop_windows_process_tree",
+        lambda _pid: (True, [2469]),
+    )
+
+    await manager.stop()
+
+    assert "2469" in manager.last_error
+
+
+@pytest.mark.asyncio
+async def test_stop_reports_root_process_not_confirmed(monkeypatch) -> None:
+    manager = _manager()
+
+    class Process:
+        pid = 2468
+        returncode = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    manager._process = Process()
+    monkeypatch.setattr(agent_sdk.os, "name", "nt")
+    monkeypatch.setattr(
+        manager,
+        "_stop_windows_process_tree",
+        lambda _pid: (False, [2468]),
+    )
+
+    await manager.stop()
+
+    assert "root process" in manager.last_error
+    assert "2468" in manager.last_error
+
+
+@pytest.mark.asyncio
 async def test_wait_ready_returns_immediately_on_bind_failure() -> None:
     manager = _manager()
     manager._process = type("Process", (), {"returncode": None})()

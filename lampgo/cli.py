@@ -134,7 +134,11 @@ def main() -> None:
 
     # --- clear ---
     clear_p = sub.add_parser("clear", help="Stop related processes and release motor torque")
-    clear_p.add_argument("--skip-kill", action="store_true", help="Do not terminate related processes")
+    clear_p.add_argument(
+        "--skip-kill",
+        action="store_true",
+        help="Do not terminate related processes; also skip torque release",
+    )
     clear_p.add_argument("--skip-release", action="store_true", help="Do not connect/disconnect motor bus")
 
     # --- ping ---
@@ -1009,7 +1013,7 @@ def _cmd_clear(args: argparse.Namespace) -> None:
     process_cleanup_confirmed = False
 
     if getattr(args, "skip_kill", False):
-        lines.append("Skip process cleanup (--skip-kill).")
+        lines.append("Skip process cleanup (--skip-kill); torque release is also skipped.")
     elif os.name == "nt" and _load_windows_psutil() is None:
         lines.append("Skipped process cleanup: psutil is unavailable on Windows.")
     else:
