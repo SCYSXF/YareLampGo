@@ -74,7 +74,7 @@ uv run lampgo run --web --no-hw
 uv run lampgo detect
 ```
 
-再启动一次完整编号向导。省略 `--port` 时会自动选择探测到的电机端口：
+再启动一次完整编号向导。省略 `--port` 时，命令先使用配置里已保存的 `device.motor_port`；没有保存端口时才自动探测：
 
 ```bash
 uv run lampgo setup-motors

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import socket
 import stat
 from collections.abc import Awaitable, Callable
@@ -25,6 +27,8 @@ logger = structlog.get_logger(__name__)
 DEFAULT_SOCKET_PATH = "/tmp/lampgo.sock"
 DEFAULT_TCP_HOST = "127.0.0.1"
 DEFAULT_TCP_PORT = 28420
+IPC_TOKEN_FIELD = "_lampgo_ipc_token"
+IPC_TOKEN_PATH_ENV = "LAMPGO_IPC_TOKEN_FILE"
 TCP_PORT_BASE = 20000
 TCP_PORT_SPAN = 20000
 DARWIN_SUN_PATH_MAX = 103
@@ -39,6 +43,54 @@ class _Endpoint:
 
 def _get_socket_path() -> str:
     return os.environ.get("LAMPGO_SOCKET", DEFAULT_SOCKET_PATH)
+
+
+def _get_token_path(token_path: str | Path | None = None) -> Path:
+    if token_path is not None:
+        return Path(token_path).expanduser()
+    override = os.environ.get(IPC_TOKEN_PATH_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".lampgo" / "ipc-token"
+
+
+def _chmod_private(path: Path, mode: int, event: str) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        logger.warning(event, path=str(path), error=str(exc))
+
+
+def _read_ipc_token(token_path: str | Path | None = None) -> str:
+    path = _get_token_path(token_path)
+    token = path.read_text(encoding="utf-8").strip()
+    if len(token) < 32:
+        raise ValueError(f"LampGo IPC token file is invalid: {path}")
+    return token
+
+
+def _ensure_ipc_token(token_path: str | Path | None = None) -> str:
+    """Create or load the per-user token required by loopback TCP IPC."""
+    path = _get_token_path(token_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_private(path.parent, 0o700, "ipc.token_directory_chmod_failed")
+
+    try:
+        token = _read_ipc_token(path)
+    except FileNotFoundError:
+        token = secrets.token_urlsafe(32)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except FileExistsError:
+            token = _read_ipc_token(path)
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as token_file:
+                token_file.write(token + "\n")
+    _chmod_private(path, 0o600, "ipc.token_chmod_failed")
+    return token
 
 
 def _max_unix_socket_path_len() -> int:
@@ -134,11 +186,14 @@ class IPCServer:
         self,
         handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
         socket_path: str | None = None,
+        token_path: str | Path | None = None,
     ) -> None:
         self._handler = handler
         raw_socket_path = socket_path or _get_socket_path()
         self._socket_path = _normalize_socket_path(raw_socket_path)
         self._endpoint = _endpoint_for_path(self._socket_path)
+        self._token_path = _get_token_path(token_path)
+        self._token: str | None = None
         self._server: asyncio.AbstractServer | None = None
 
     @property
@@ -149,6 +204,7 @@ class IPCServer:
     async def start(self) -> None:
         if self._endpoint.kind == "tcp":
             host, port = self._endpoint.address
+            self._token = _ensure_ipc_token(self._token_path)
             self._server = await asyncio.start_server(self._handle_connection, host=host, port=port)
             sockets = self._server.sockets or []
             if sockets:
@@ -167,8 +223,8 @@ class IPCServer:
         self._server = await asyncio.start_unix_server(self._handle_connection, path=str(path))
         try:
             os.chmod(str(path), 0o660)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("ipc.socket_chmod_failed", path=str(path), error=str(exc))
         logger.info("ipc.started", endpoint=self._socket_path, transport="unix")
 
     async def stop(self) -> None:
@@ -198,6 +254,19 @@ class IPCServer:
             if not raw:
                 return
             request = json.loads(raw.decode("utf-8"))
+            if not isinstance(request, dict):
+                await self._write_json(writer, {"ok": False, "error": "invalid request"})
+                return
+            if self._endpoint.kind == "tcp":
+                supplied_token = request.pop(IPC_TOKEN_FIELD, None)
+                if (
+                    not isinstance(supplied_token, str)
+                    or self._token is None
+                    or not hmac.compare_digest(supplied_token, self._token)
+                ):
+                    logger.warning("ipc.unauthorized_client", peer=writer.get_extra_info("peername"))
+                    await self._write_json(writer, {"ok": False, "error": "unauthorized"})
+                    return
             response = await self._handler(request)
             await self._write_json(writer, response)
         except TimeoutError:
@@ -220,18 +289,25 @@ class IPCServer:
                 pass
 
 
-def ipc_send(request: dict[str, Any], socket_path: str | None = None, timeout: float = 30.0) -> dict[str, Any]:
+def ipc_send(
+    request: dict[str, Any],
+    socket_path: str | None = None,
+    timeout: float = 30.0,
+    token_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Synchronous IPC client. Raises ConnectionRefusedError if absent."""
     raw_path = socket_path or _get_socket_path()
     endpoint = _endpoint_for_path(raw_path)
+    payload = dict(request)
     if endpoint.kind == "tcp":
+        payload[IPC_TOKEN_FIELD] = _read_ipc_token(token_path)
         sock = socket.create_connection(endpoint.address, timeout=timeout)
     else:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect(endpoint.address)
     try:
-        sock.sendall(json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n")
+        sock.sendall(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
         buf = b""
         while True:
             chunk = sock.recv(65536)

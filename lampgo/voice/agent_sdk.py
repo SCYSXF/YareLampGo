@@ -867,7 +867,6 @@ class AgentSDKManager:
 
     def _signal_sdk_owner(self, owner: _SDKPortOwner, *, force: bool) -> None:
         """Signal only the verified SDK process group/tree."""
-        psutil = self._psutil()
         if os.name != "nt" and owner.process_group_id is not None:
             if owner.process_group_id == os.getpgrp():
                 raise RuntimeError("refusing to signal LampGo's own process group")
@@ -878,16 +877,55 @@ class AgentSDKManager:
                 pass
             return
 
+        psutil = self._psutil()
         try:
             root = psutil.Process(owner.root_pid)
             process_tree = root.children(recursive=True) + [root]
         except psutil.NoSuchProcess:
             return
-        for process in reversed(process_tree):
+        for process in process_tree:
             try:
                 process.kill() if force else process.terminate()
             except psutil.NoSuchProcess:
                 pass
+
+    def _stop_windows_process_tree(self, root_pid: int, timeout_s: float = 5.0) -> bool:
+        """Terminate and, if needed, kill an SDK process tree on Windows."""
+        psutil = self._psutil()
+        try:
+            root = psutil.Process(root_pid)
+            process_tree = root.children(recursive=True) + [root]
+        except psutil.NoSuchProcess:
+            return False
+
+        for process in process_tree:
+            try:
+                process.terminate()
+            except psutil.NoSuchProcess:
+                pass
+
+        _, alive = psutil.wait_procs(process_tree, timeout=timeout_s)
+        if not alive:
+            return False
+
+        logger.warning(
+            "agent_sdk.stop_timeout_killing",
+            pid=root_pid,
+            pids=[process.pid for process in alive],
+        )
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+        _, still_alive = psutil.wait_procs(alive, timeout=timeout_s)
+        if still_alive:
+            raise RuntimeError(
+                "failed to stop Agent SDK process tree: "
+                + ", ".join(str(process.pid) for process in still_alive)
+            )
+        return True
 
     async def _wait_for_port_free(self, timeout_s: float) -> bool:
         loop = asyncio.get_running_loop()
@@ -1091,20 +1129,24 @@ class AgentSDKManager:
 
         try:
             if os.name == "nt":
-                proc.terminate()
+                await asyncio.to_thread(self._stop_windows_process_tree, pid)
+                await proc.wait()
             elif pgid is not None:
                 os.killpg(pgid, signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except TimeoutError:
+                    logger.warning("agent_sdk.stop_timeout_killing", pid=pid, pgid=pgid)
+                    os.killpg(pgid, signal.SIGKILL)
+                    await proc.wait()
             else:
                 proc.send_signal(signal.SIGTERM)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except TimeoutError:
-                logger.warning("agent_sdk.stop_timeout_killing", pid=pid, pgid=pgid)
-                if os.name != "nt" and pgid is not None:
-                    os.killpg(pgid, signal.SIGKILL)
-                else:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except TimeoutError:
+                    logger.warning("agent_sdk.stop_timeout_killing", pid=pid, pgid=pgid)
                     proc.kill()
-                await proc.wait()
+                    await proc.wait()
         except ProcessLookupError:
             pass
         except Exception:

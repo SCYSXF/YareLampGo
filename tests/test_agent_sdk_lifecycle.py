@@ -99,6 +99,70 @@ async def test_release_sdk_port_terminates_verified_process_group(monkeypatch) -
     assert signals == [False, True]
 
 
+def test_windows_process_tree_is_killed_after_graceful_timeout(monkeypatch) -> None:
+    manager = _manager()
+    events: list[str] = []
+
+    class NoSuchProcess(Exception):
+        pass
+
+    class FakeProcess:
+        def __init__(self, pid: int, children=None) -> None:
+            self.pid = pid
+            self._children = list(children or [])
+
+        def children(self, *, recursive: bool):
+            assert recursive
+            return list(self._children)
+
+        def terminate(self) -> None:
+            events.append(f"terminate:{self.pid}")
+
+        def kill(self) -> None:
+            events.append(f"kill:{self.pid}")
+
+    child = FakeProcess(2002)
+    root = FakeProcess(2001, [child])
+    waits = iter(
+        [
+            ([], [child]),
+            ([child], []),
+        ]
+    )
+    fake_psutil = SimpleNamespace(
+        NoSuchProcess=NoSuchProcess,
+        Process=lambda pid: root if pid == root.pid else (_ for _ in ()).throw(NoSuchProcess()),
+        wait_procs=lambda processes, timeout: next(waits),
+    )
+    monkeypatch.setattr(manager, "_psutil", lambda: fake_psutil)
+
+    assert manager._stop_windows_process_tree(root.pid, timeout_s=0.01)
+    assert events == ["terminate:2002", "terminate:2001", "kill:2002"]
+
+
+@pytest.mark.asyncio
+async def test_stop_uses_windows_process_tree(monkeypatch) -> None:
+    manager = _manager()
+    calls: list[int] = []
+
+    class Process:
+        pid = 2468
+        returncode = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    manager._process = Process()
+    monkeypatch.setattr(agent_sdk.os, "name", "nt")
+    monkeypatch.setattr(manager, "_stop_windows_process_tree", lambda pid: calls.append(pid))
+
+    await manager.stop()
+
+    assert calls == [2468]
+    assert manager._process is None
+
+
 @pytest.mark.asyncio
 async def test_wait_ready_returns_immediately_on_bind_failure() -> None:
     manager = _manager()

@@ -375,9 +375,12 @@ def _build_help_text() -> str:
 def _find_related_pids() -> list[int]:
     """Find LampGo process ids, excluding the current command and its parent."""
     if os.name == "nt":
-        windows_pids = _find_related_pids_windows()
-        if windows_pids:
-            return windows_pids
+        return _find_related_pids_windows()
+    return _find_related_pids_posix()
+
+
+def _find_related_pids_posix() -> list[int]:
+    """Find LampGo processes from the POSIX process table."""
 
     current_pid = os.getpid()
     parent_pid = os.getppid()
@@ -421,6 +424,11 @@ def _find_related_pids_windows() -> list[int]:
     try:
         import psutil
     except ImportError:
+        print(
+            "[warn] Windows process cleanup requires psutil. "
+            "Re-run .\\install.ps1 or install the project dependencies.",
+            file=sys.stderr,
+        )
         return []
 
     current_pid = os.getpid()
@@ -490,7 +498,12 @@ def _terminate_pids_windows(pids: list[int]) -> tuple[list[int], list[int]]:
     try:
         import psutil
     except ImportError:
-        return _terminate_pids_posix_fallback(pids)
+        print(
+            "[warn] Windows process cleanup requires psutil. "
+            "Re-run .\\install.ps1 or install the project dependencies.",
+            file=sys.stderr,
+        )
+        return [], sorted(set(pids))
 
     terminated: list[int] = []
     failed: list[int] = []
@@ -512,21 +525,6 @@ def _terminate_pids_windows(pids: list[int]) -> tuple[list[int], list[int]]:
             except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
                 failed.append(process.pid)
     return sorted(set(terminated)), sorted(set(failed))
-
-
-def _terminate_pids_posix_fallback(pids: list[int]) -> tuple[list[int], list[int]]:
-    """Best-effort fallback used only if psutil is unavailable on Windows."""
-    terminated: list[int] = []
-    failed: list[int] = []
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            terminated.append(pid)
-        except ProcessLookupError:
-            pass
-        except Exception:
-            failed.append(pid)
-    return terminated, sorted(set(failed))
 
 
 def _release_motor_torque(config) -> str:

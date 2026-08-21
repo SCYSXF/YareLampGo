@@ -110,6 +110,7 @@ V2.0 replaces V1.0. Do not mix structures, wiring, or calibration files across g
 
 | What you need | Entry point |
 | --- | --- |
+| Windows x64 installation, COM auto-detection, servo IDs, calibration, and acceptance | [Complete Windows hardware flow](docs/getting-started/windows-hardware-flow.md) |
 | V2 hardware, assembly, and first power | [V2.0 Hardware and Assembly](docs/hardware/v2/README.en.md) |
 | Power, S3/C6, audio, LED, and servo wiring | [V2.0 Wiring](docs/hardware/wiring.md) |
 | Complete STEP assembly | [V2.0 Structure](assets/printable/README.en.md) |

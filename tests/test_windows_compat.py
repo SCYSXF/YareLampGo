@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 
@@ -47,18 +48,64 @@ def test_windows_config_default_is_tcp_endpoint(monkeypatch):
     assert config.LampgoConfig().socket_path == "tcp://127.0.0.1:28420"
 
 
-def test_tcp_ipc_round_trip():
+def test_tcp_ipc_round_trip(tmp_path):
     from lampgo.ipc import IPCServer, ipc_send
 
     async def run() -> None:
         async def handler(request):
             return {"ok": True, "result": request}
 
-        server = IPCServer(handler, socket_path="tcp://127.0.0.1:0")
+        token_path = tmp_path / "ipc-token"
+        server = IPCServer(
+            handler,
+            socket_path="tcp://127.0.0.1:0",
+            token_path=token_path,
+        )
         await server.start()
         try:
-            response = await asyncio.to_thread(ipc_send, {"cmd": "ping"}, server.socket_path)
+            request = {"cmd": "ping"}
+            response = await asyncio.to_thread(
+                ipc_send,
+                request,
+                socket_path=server.socket_path,
+                token_path=token_path,
+            )
             assert response == {"ok": True, "result": {"cmd": "ping"}}
+            assert request == {"cmd": "ping"}
+            assert len(token_path.read_text(encoding="utf-8").strip()) >= 32
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_tcp_ipc_rejects_unauthorized_request(tmp_path):
+    from lampgo.ipc import IPCServer
+
+    async def run() -> None:
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            return {"ok": True}
+
+        server = IPCServer(
+            handler,
+            socket_path="tcp://127.0.0.1:0",
+            token_path=tmp_path / "ipc-token",
+        )
+        await server.start()
+        try:
+            host, port = server._endpoint.address
+            reader, writer = await asyncio.open_connection(host, port)
+            writer.write(json.dumps({"cmd": "move"}).encode("utf-8") + b"\n")
+            await writer.drain()
+            response = json.loads((await reader.readline()).decode("utf-8"))
+            writer.close()
+            await writer.wait_closed()
+
+            assert response == {"ok": False, "error": "unauthorized"}
+            assert requests == []
         finally:
             await server.stop()
 
@@ -110,6 +157,49 @@ def test_windows_serial_port_detection_skips_bluetooth_virtual_ports(monkeypatch
     assert autodetect._list_serial_ports() == ["COM5"]
 
 
+def test_windows_serial_port_import_error_is_logged(monkeypatch):
+    import lampgo.autodetect as autodetect
+
+    events = []
+    monkeypatch.setitem(sys.modules, "serial", None)
+    monkeypatch.setitem(sys.modules, "serial.tools", None)
+    monkeypatch.setattr(autodetect.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        autodetect.logger,
+        "warning",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    assert autodetect._list_serial_ports() == []
+    assert events == [("autodetect.no_pyserial", {})]
+
+
+def test_windows_serial_port_enumeration_error_is_logged(monkeypatch):
+    import lampgo.autodetect as autodetect
+
+    serial_module = types.ModuleType("serial")
+    tools_module = types.ModuleType("serial.tools")
+    list_ports_module = types.ModuleType("serial.tools.list_ports")
+    list_ports_module.comports = lambda: (_ for _ in ()).throw(RuntimeError("registry unavailable"))
+    serial_module.tools = tools_module
+    tools_module.list_ports = list_ports_module
+    monkeypatch.setitem(sys.modules, "serial", serial_module)
+    monkeypatch.setitem(sys.modules, "serial.tools", tools_module)
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", list_ports_module)
+    monkeypatch.setattr(autodetect.platform, "system", lambda: "Windows")
+    events = []
+    monkeypatch.setattr(
+        autodetect.logger,
+        "warning",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    assert autodetect._list_serial_ports() == []
+    assert events == [
+        ("autodetect.windows_port_enumeration_failed", {"error": "registry unavailable"})
+    ]
+
+
 def test_serial_motor_detection_uses_single_port_fallback(monkeypatch):
     import lampgo.autodetect as autodetect
 
@@ -155,6 +245,6 @@ def test_desktop_backend_uses_windows_file_association(monkeypatch):
     monkeypatch.setattr("os.name", "nt")
     monkeypatch.setattr("os.startfile", lambda app: launched.append(app), raising=False)
 
-    backend = PyAutoGUIBackend()
+    backend = object.__new__(PyAutoGUIBackend)
     assert backend.app_launch("calc.exe") is True
     assert launched == ["calc.exe"]

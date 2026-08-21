@@ -22,6 +22,8 @@ from typing import Any, ClassVar, Literal
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
+from lampgo.ipc import DEFAULT_SOCKET_PATH, DEFAULT_TCP_HOST, DEFAULT_TCP_PORT
+
 
 class JointLimits(BaseModel):
     """Position limits for a single joint (degrees)."""
@@ -42,8 +44,8 @@ DEFAULT_JOINT_LIMITS: dict[str, JointLimits] = {
 def _default_socket_path() -> str:
     """Return the platform-native local IPC endpoint setting."""
     if os.name == "nt":
-        return "tcp://127.0.0.1:28420"
-    return "/tmp/lampgo.sock"
+        return f"tcp://{DEFAULT_TCP_HOST}:{DEFAULT_TCP_PORT}"
+    return DEFAULT_SOCKET_PATH
 
 
 class MotorConfig(BaseModel):

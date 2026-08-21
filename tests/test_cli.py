@@ -33,7 +33,7 @@ def test_build_help_text_contains_common_commands():
     assert "uv run lampgo <command> --help" in text
 
 
-def test_find_related_pids_filters_self_and_parent(monkeypatch):
+def test_find_related_pids_posix_filters_self_and_parent(monkeypatch):
     monkeypatch.setattr(cli.os, "getpid", lambda: 100)
     monkeypatch.setattr(cli.os, "getppid", lambda: 99)
     fake_ps = SimpleNamespace(
@@ -47,8 +47,27 @@ def test_find_related_pids_filters_self_and_parent(monkeypatch):
     )
     monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: fake_ps)
 
-    pids = cli._find_related_pids()
+    pids = cli._find_related_pids_posix()
     assert pids == [200]
+
+
+def test_find_related_pids_windows_does_not_fall_back_to_posix(monkeypatch):
+    monkeypatch.setattr(cli.os, "name", "nt")
+    monkeypatch.setattr(cli, "_find_related_pids_windows", lambda: [])
+    monkeypatch.setattr(
+        cli,
+        "_find_related_pids_posix",
+        lambda: (_ for _ in ()).throw(AssertionError("POSIX fallback must not run on Windows")),
+    )
+
+    assert cli._find_related_pids() == []
+
+
+def test_find_related_pids_windows_warns_when_psutil_is_missing(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "psutil", None)
+
+    assert cli._find_related_pids_windows() == []
+    assert "requires psutil" in capsys.readouterr().err
 
 
 def test_resolve_calibration_port_prefers_cli_or_config(monkeypatch):
@@ -100,6 +119,36 @@ def test_resolve_motor_port_auto_detect_ignores_saved_port(monkeypatch):
     )
 
     assert cli._resolve_motor_port(args, config) == "COM5"
+
+
+def test_resolve_motor_port_keeps_multiple_ports_ambiguous_when_noninteractive(
+    monkeypatch,
+    capsys,
+):
+    args = argparse.Namespace(port=None, auto_detect=True)
+    config = SimpleNamespace(device=SimpleNamespace(motor_port="COM7"))
+
+    import lampgo.autodetect as autodetect
+
+    monkeypatch.setattr(
+        autodetect,
+        "detect_motor_port",
+        lambda: {
+            "motor_port": None,
+            "motor_detection": "ambiguous",
+            "motor_candidates": ["COM2", "COM5"],
+            "messages": ["Candidate ports require confirmation"],
+        },
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    assert cli._resolve_motor_port(args, config, interactive=False) is None
+    error = capsys.readouterr().err
+    assert "COM2, COM5" in error
+    assert "Use --port <COMx>" in error
 
 
 def test_calibration_aborts_outside_project_root(monkeypatch, tmp_path, capsys):
@@ -249,7 +298,9 @@ def test_virtual_motion_stream_frames_updates_joint_state():
         motion.stop()
 
 
-def test_no_hw_server_uses_virtual_motion_for_skills(tmp_path):
+def test_no_hw_server_uses_virtual_motion_for_skills(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAMPGO_IPC_TOKEN_FILE", str(tmp_path / "ipc-token"))
+
     async def run() -> None:
         from lampgo.core.config import LampgoConfig
         from lampgo.server import LampgoServer

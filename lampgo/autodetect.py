@@ -35,7 +35,11 @@ def _list_serial_ports() -> list[str]:
                     logger.info("autodetect.skip_bluetooth_serial_port", port=device)
                     continue
                 ports.add(device)
-        except Exception:
+        except ImportError:
+            logger.warning("autodetect.no_pyserial")
+            return []
+        except Exception as exc:
+            logger.warning("autodetect.windows_port_enumeration_failed", error=str(exc))
             return []
         return sorted(ports, key=_serial_port_sort_key)
 
